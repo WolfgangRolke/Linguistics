@@ -1,0 +1,354 @@
+---
+header-includes: \usepackage{color}
+                 \usepackage{float}
+output:
+  html_document: default
+  pdf_document:
+    fig_caption: no
+---
+
+
+## General Description of the Experiment
+
+There are j (=4) distinct sentence types. A variation of each of these is asked k (=6) times. The replies to each  are judged as either correct or incorrect. The experiment has n (=85) participants. The research question is whether there is a difference between the percentage of sentence types answered correctly. If so, one would like to know which pairs of sentence types are different.
+
+##  Real Life Example 
+
+```{r}
+dta <- read.csv(paste0(getwd(),"/ling425.csv"), header=FALSE)
+tmp <- dta[1, ]
+dta <- data.matrix(dta[-1, ])
+colnames(dta) <- tmp
+head(dta)
+answers <- unique(colnames(dta))
+resp <- matrix(0, 85, 4)
+colnames(resp) <- answers
+for(i in 1:85) {
+  for(j in 1:4)
+    resp[i, j] <- mean(dta[i, colnames(dta)==answers[j]], na.rm = TRUE)
+}
+round(resp[1:10, ], 3)
+```
+
+
+## Simulating the Experiment
+
+we will recreate the experiment as closely as possible on the computer. To do so we specify n, k, and j as well as the probabilities of correct answers. Then we randomly generate answers accorind to thos probabilities. We simply use letters A, B, C, .. as labels for the different types of sentences. Finally we include the possibility of missing values.
+
+
+```{r}
+gen.data.anova <- 
+  function(p=c(0.78, 0.58, 0.78, 0.84), 
+           n=75, k=6, j=4, n.missing) {
+  groups <- rep(LETTERS[1:j], each=k)
+  y <- matrix(0, n, k*j)
+  colnames(y) <- groups
+  for(i in 1:j) {
+    y[ ,colnames(y)==LETTERS[i]] <- 
+      sample(0:1, size = n*k, replace = TRUE, 
+             prob = c(1-p[i], p[i]))
+  }
+  if(!missing(n.missing)) {
+    for(i in 1:n.missing) {
+      y[sample(1:n, 1), sample(1:(k*j), 1)] <- NA
+    }
+  }
+  y
+}
+```
+
+Here is an example where for all the groups the chance of a right or a wrong answer is the same:
+
+
+```{r}
+y <- gen.data.anova(c(0.5, 0.5, 0.5, 0.5), 
+                    n.missing = 70)
+head(y)
+# number of missing values:
+n.missing <- sum(sapply(y, function(x) sum(is.na(x))))
+n.missing
+# percentage of 1s:
+sum(y, na.rm = T)/(85*6*4-n.missing)
+
+```
+
+## What's wrong with ANOVA
+
+Let's analyse the data via ANOVA
+
+```{r}
+do.anova <- function(y, n=75, k=6, j=4) {
+  groups <- rep(LETTERS[1:j], each=k)
+  resp <- matrix(0, n, j)
+  colnames(resp) <- LETTERS[1:j]
+  for(i in 1:j) {
+    tmp <- y[, groups==LETTERS[i]] 
+    resp[, i] <- apply(tmp, 1, mean, na.rm=TRUE)
+  }
+  df <- data.frame(resp=c(resp), 
+                 group=rep(groups, each=n))
+  fit <- aov(df$resp ~ df$group)
+  as.numeric(unlist(summary(fit))[9])
+}
+```
+
+To see how this method performs we do the following:
+
+-  generate an example data set with the probabilities of all groups the same, so we know the null hypothesis is true and should be rejected.
+
+-  use ANOVA to calculate the p value
+
+-  repeat many times
+
+-  find the percentage of simulation runs that rejected the null. If the method works this should match the nomial type I error.
+
+
+```{r}
+B <- 10000
+pvals <- rep(0, B)
+for(i in 1:B) {
+  y <- gen.data.anova(p=c(0.5, 0.5, 0.5, 0.5),
+                      n.missing = 70)
+  pvals[i] <- do.anova(y)
+}
+cat(sum(pvals<0.05)," ",sum(pvals<0.05)/B)
+```
+
+so instead of the desired 500 (5% of 10000) rejections we only get 2!
+
+This shows that ANOVA here is extremely conservative, which also means it will have very low power.
+
+Is there a reason for this? One of the assumptions for ANOVA is that that comes from a normal distribution (aka a bell-shaped histogram). Among other things this means the data should be a continuum of values. In our case instead we have only seven possible values: 0/6, 1/6, .., 6/6.
+
+A deeper reason is the following: the ANOVA test is based on the F statistic, which is the ratio of an estimate of the within group variance and the overall variance. If there are only a few possible values these will be closer together than they should be, so that the ratio is lose to 1 and the test fails to reject the null.
+
+Instead of a normal distribution what we have is in fact a Binomial distribution, namely the number of correct answers per person and sentence type. 
+
+There are cases where this change from a Binomial to a normal can work, because of the central limit theorem. This however would require a large number of repetitions per sentence, at a minimum around 20. Even so, we should always try to do as much without using any approximations as we can.
+
+## Other Methods
+
+### Chisquare Test for Indepence
+
+The chisquare test for indepenence ia a standard method in Statistics for this type of experiment. It is a large sample test, meaning it requires a sufficiently large sample. This should generally be true in these types of experiments. There is a simple way to make sure that the test works, by checking the so called expected counts. 
+
+### Fisher's Exact test
+
+This is a method based on a consideration of all possible permutations derived by Fisher. It has the advantage of being an exact test, that is is will work for any sample size. It has the disadvantage of being quite slow to calculated. This is especially true for large samples.
+
+So we can use the chisquare test if there is a large number of participants, and the Fisher test if not.
+
+### Implementation
+
+Both of these tests are based on the counts of correct and wrong answers. Note that this means that the issue of missing answers is taken care of automatically (they are simply ignored).
+
+We can therefore simplify the generating of the data with
+
+```{r}
+gen.data <- function(p, n) {
+  x <- rbinom(length(p), n, p)
+  cbind(x, n-x)
+}
+```
+
+and create a single test routine:
+
+```{r}
+do.test <- function(x, method="Chi") {
+  if(method=="Chi") {
+    pval <- chisq.test(x)$p.value 
+  }      
+  if(method=="Fisher")
+    pval <- fisher.test(x, 
+              simulate.p.value = TRUE)$p.value 
+  if(pval<0.001) pval <- 0
+  pval
+}
+```
+
+Let's repeat the above simulation:
+
+
+```{r cache=TRUE}
+B <- 1e3
+pvals <- matrix(0, B, 2)
+colnames(pvals) <- c("Chisquare", "Fisher")
+for(i in 1:B) {
+  y <- gen.data(p = c(0.5, 0.5, 0.5, 0.5), 
+                n = c(500, 500, 500, 500))
+  pvals[i, 1] <- do.test(y, method = "Chi")
+  pvals[i, 2] <- do.test(y, method = "Fisher")
+}
+f <- function(x, a=0.05, B) {
+  length(x[x<a])/B
+}
+apply(pvals, 2, f, a=0.01, B=B)
+apply(pvals, 2, f, a=0.05, B=B)
+apply(pvals, 2, f, a=0.1, B=B)
+```
+
+and we see that both methods yield the correct type I error rates. 
+
+## Power
+
+Here is another reason why one should not use ANOVA: let's find the probability that null hypothesis is rejected when indeed it is false. This is called the power of a test:
+
+```{r cache=TRUE}
+B <- 1e3
+# Last group is different:
+p <- c(0.8, 0.8, 0.8, 0.7) 
+pvals <- matrix(0, B, 2)
+colnames(pvals) <- c("Chisquare", "ANOVA")
+for(i in 1:B) {
+  y <- gen.data(p = p, 
+                n = c(500, 500, 500, 500))
+  pvals[i, 1] <- do.test(y, method = "Chi")
+  y <- gen.data.anova(p=p, n.missing = 0)
+  pvals[i, 2] <- do.anova(y)
+}
+apply(pvals, 2, f, a=0.05, B=B)*100
+```
+
+so while the chisquare test is almost guaranteed to find this difference the ANOVA will mostly fail to do so.
+
+## Pairwise Comparisons
+
+The comparison of group i and group j is done with the same test, now only applied to the data from groups i and j:
+
+```{r}
+pairwise <- function(x, method="Chi") {
+  fun <- function(x) do.test(x, method=method)
+  m <- dim(x)[1]
+  if(is.null(rownames(x)[1])) 
+    rownames(x) <- 1:m
+  pvals <- rep(0, m*(m-1)/2)
+  k <- 0
+  for(i in 1:(m-1)) 
+    for(j in (i+1):m) {
+      k <- k+1
+      pvals[k] <- fun(x[c(i,j), ])
+      names(pvals)[k] <-
+        paste(rownames(x)[i],"-", rownames(x)[j])
+    }
+  pvals
+}
+```
+
+**Example of all groups the same**
+
+```{r cache=TRUE}
+x <- gen.data(rep(0.5, 4), 500)
+round(pairwise(x, "Chi"), 4)
+```
+
+and all p values are greater than 0.05
+
+**Example of groups 1,2 different from 3, 4:**
+
+```{r}
+set.seed(11)
+```
+
+
+```{r cache=TRUE}
+x <- gen.data(c(0.8, 0.8, 0.6, 0.6), 500)
+round(pairwise(x, "Chi"), 4)
+```
+
+
+There is however the problem of *simultaneous inference*:
+
+
+```{r cache=TRUE}
+sim.pairs <- function(p, j, n, alpha=0.05, B=1000) {
+  rejected <- 0
+  for(i in 1:B) {
+    x <- gen.data(rep(0.8, j), n)
+    pvals <- pairwise(x, "Chi")
+    if(min(pvals)<alpha) rejected <- rejected+1
+  }
+  rejected/B
+}
+tmp <- sim.pairs(0.8, 4, 500)
+tmp
+```
+
+So the true probability that **at least one** pairwise comparison fails is `r tmp`, not 0.05.
+
+The reason is this: even if all groups are the same, by random chance each test has a 5% chance of falsely rejecting the null, but if we keep doing these tests, sooner or later we WILL reject one.
+
+This is like rolling dice, sooner or later you will get a six.
+
+### Solution 1 - Bonferroni
+
+If all the pairwise comparisons where independent probability theory would suggest to use $\alpha/j$ in each test for a family-wise error rate of $\alpha$. 
+
+### Solution 2 - Holm's method
+
+Bonferroni's method gives the correct solution if all the tests are independent. This however is not going to be the case because the same data enters into a number of tests. Holm devised a procedure that generally leads to resonable error rates. 
+
+Both methods (as well as several others) are implemented in the R routine *pairwise.prop.test*
+
+Notice that both methods can fail if there is a dependence between the sentences. In the most extreme case of a total dependence (if a participate gets one wrong, they are almost certain to get all wrong), the correct thing to do would be to use the unadjusted p- values. This however is an unlikely situation.
+
+# Analysis of Ling 425
+
+```{r}
+n <- rep(0, 4)
+for(i in 1:4) {
+  tmp <- c(dta[, colnames(dta)==answers[i]])
+  x[i] <- sum(tmp, na.rm = TRUE)
+  n[i] <- length(tmp[!is.na(tmp)]) 
+}
+x <- cbind(x, n-x, n)
+df1 <- data.frame(`Correct Answers`=x[, 1], 
+           `Wrong Answers`=x[, 2],
+           Percentage=round(100*x[, 1]/(x[, 1]+x[, 2]), 1))
+# Data
+df1 <- df1[order(df1[[3]]), ]
+df1
+cat("Overall Test with Chisquare")
+do.test(x, method = "Chi")
+cat("Overall Test with Fisher's Exact test")
+do.test(x, method = "Fisher")
+```
+
+so both methods reject the null of no difference.
+
+### Pairwise Comparisons
+
+```{r}
+pairwise <- function(x, alpha=0.05, method="holm") {
+  m <- dim(x)[1]
+  n <- x[, 2]+x[, 1]
+  if(is.null(rownames(x))) names(n) <- 1:m
+  else names(n) <- rownames(x)
+  x <- x[, 1]
+  names(x) <- names(n)
+  z <- pairwise.prop.test(x, n, 
+                          p.adjust.method=method)$p.value
+  out <- rep(0, (m-1)^2)
+  k <- 0
+  for(i in 1:(m-1))
+    for(j in 1:(m-1)) {
+      k <- k+1
+      names(out)[k] <- paste(rownames(z)[i], " - ",
+                             colnames(z)[j])
+      out[k] <- z[i, j]
+    }
+  out <- out[!is.na(out)]
+  out <- out[order(out)]
+  round(out, 4)
+}
+```
+
+
+```{r}
+kable.nice(pairwise(x))
+```
+
+so both methods find no stat. significant difference between Colectivo SG and No Colectivo PL and between No Colectivo SG and Colectivo SG.
+
+## Online App
+
+We can make it very easy for people to apply this method to their own data, even if they know nothing of R. This is done by using an app that will run in any browser. For a first draft of such an app go to [https://drrolke.shinyapps.io/multiple-binomial-test/](https://drrolke.shinyapps.io/multiple-binomial-test/)
